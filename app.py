@@ -284,8 +284,8 @@ with st.sidebar:
         params["ibs_exit"]  = st.slider("IBS Exit threshold >",  0.50, 0.95, 0.80, 0.01,
                                          help="Exit when IBS exceeds this value")
         params["ma_type"]   = st.radio("MA type", ["SMA", "EMA"], horizontal=True)
-        params["ma_period"] = st.number_input("MA period", 10, 500, 200, step=10,
-                                               help="Close must be above this MA to take longs")
+        params["ma_period"] = st.selectbox("MA period", [20, 50, 100, 200], index=3,
+                                             help="Close must be above this MA to take longs")
 
     elif strategy_name == "RSI Mean Reversion":
         params["rsi_period"]  = st.slider("RSI period",    5,  30, 14, 1)
@@ -296,7 +296,7 @@ with st.sidebar:
         params["mom_period"]    = st.slider("Momentum period (bars)", 5, 60, 20, 1)
         params["entry_thresh"]  = st.slider("Entry threshold (%)",   0.5, 8.0, 2.0, 0.1)
         params["exit_thresh"]   = st.slider("Exit flat zone (%)",    0.0, 3.0, 0.5, 0.1)
-        params["ma_period"]     = st.number_input("Trend filter MA period", 20, 300, 100, step=10)
+        params["ma_period"]     = st.selectbox("Trend filter MA period", [20, 50, 100, 200], index=2)
         params["bidirectional"] = st.checkbox("Enable short trades", value=True)
 
     elif strategy_name == "ATR Range Filter":

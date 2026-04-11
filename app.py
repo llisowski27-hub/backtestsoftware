@@ -319,6 +319,27 @@ with st.sidebar:
     slippage  = st.number_input("Slippage (price units)",  0.0, 50.0,  0.0, 0.5)
 
     st.markdown("---")
+
+    # ---------------------------------------------------------------------------
+    # SIDEBAR — RISK MANAGEMENT
+    # ---------------------------------------------------------------------------
+    st.markdown("## 🛡️ Risk Management")
+
+    tp_pct = st.slider("Take Profit (%)", 0.0, 20.0, 0.0, 0.1,
+                        help="Exit when trade profit exceeds this %. 0 = disabled.")
+    sl_pct = st.slider("Stop Loss (%)",   0.0, 20.0, 0.0, 0.1,
+                        help="Exit when trade loss exceeds this %. 0 = disabled.")
+
+    use_atr_sl = st.checkbox("Use ATR-based stop loss", value=False,
+                              help="Replaces fixed Stop Loss % when enabled.")
+    atr_sl_mult   = 0.0
+    atr_sl_period = 14
+    if use_atr_sl:
+        atr_sl_period = st.slider("ATR period",     5,  50, 14, 1)
+        atr_sl_mult   = st.slider("ATR multiplier", 0.5, 5.0, 2.0, 0.1,
+                                   help="Stop = entry ± ATR(period) × multiplier")
+
+    st.markdown("---")
     run_btn = st.button("▶  Run Backtest", type="primary", use_container_width=True)
 
 # ---------------------------------------------------------------------------
@@ -377,6 +398,10 @@ if run_btn or ("results" in st.session_state):
                 strategy_fn=strategy_fn,
                 transaction_costs_bps=costs_bps,
                 slippage=slippage,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                atr_sl_mult=atr_sl_mult,
+                atr_sl_period=atr_sl_period,
             )
 
         metrics = compute_analytics(

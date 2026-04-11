@@ -268,21 +268,134 @@ def strategy_momentum_trend(df: pd.DataFrame) -> pd.Series:  # noqa: F811
 # SECTION 4 — BACKTESTING ENGINE
 # ---------------------------------------------------------------------------
 
+def apply_tp_sl(
+    position: pd.Series,
+    df: pd.DataFrame,
+    tp_pct: float = 0.0,
+    sl_pct: float = 0.0,
+    atr_sl_series: pd.Series | None = None,
+    atr_sl_mult: float = 2.0,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Apply fixed-% and/or ATR-based TP/SL to a position series.
+
+    Checks each bar's High/Low to detect breaches intrabar. When hit, the
+    position is closed on that bar and the actual exit return (prev_close →
+    TP/SL price) is recorded in override_ret so the engine uses it instead of
+    the default close-to-close calculation.
+
+    Priority: if both SL and TP are hit on the same bar, SL wins (conservative).
+    Gap-through handled: if Open already beyond SL, fills at Open.
+    """
+    pos       = position.to_numpy().copy()
+    opens     = df["open"].to_numpy()
+    highs     = df["high"].to_numpy()
+    lows      = df["low"].to_numpy()
+    closes    = df["close"].to_numpy()
+    atr_arr   = atr_sl_series.to_numpy() if atr_sl_series is not None else None
+
+    override_ret = np.full(len(pos), np.nan)
+
+    in_trade    = False
+    direction   = 0
+    sl_level    = np.nan
+    tp_level    = np.nan
+    prev_close  = np.nan
+
+    for i in range(len(pos)):
+        prev = pos[i - 1] if i > 0 else 0
+
+        if not in_trade and pos[i] != 0:
+            in_trade   = True
+            direction  = pos[i]
+            entry_open = opens[i]
+
+            # SL: ATR-based takes priority over fixed %
+            if atr_arr is not None and not np.isnan(atr_arr[i]) and atr_sl_mult > 0:
+                sl_dist = atr_sl_mult * atr_arr[i]
+            elif sl_pct > 0:
+                sl_dist = entry_open * sl_pct / 100.0
+            else:
+                sl_dist = np.nan
+
+            sl_level = (entry_open - sl_dist if direction == 1 else entry_open + sl_dist) \
+                       if not np.isnan(sl_dist) else np.nan
+
+            tp_level = (entry_open * (1 + tp_pct / 100.0) if direction == 1
+                        else entry_open * (1 - tp_pct / 100.0)) if tp_pct > 0 else np.nan
+
+            prev_close = entry_open  # entry bar: basis is the open
+
+        elif in_trade:
+            if pos[i] == 0:
+                in_trade = False
+                sl_level = tp_level = np.nan
+            else:
+                hit_sl = hit_tp = False
+                exit_price = np.nan
+
+                if direction == 1:
+                    if not np.isnan(sl_level):
+                        if opens[i] <= sl_level:          # gap through
+                            exit_price, hit_sl = opens[i], True
+                        elif lows[i] <= sl_level:
+                            exit_price, hit_sl = sl_level, True
+                    if not hit_sl and not np.isnan(tp_level) and highs[i] >= tp_level:
+                        exit_price, hit_tp = tp_level, True
+                else:  # short
+                    if not np.isnan(sl_level):
+                        if opens[i] >= sl_level:
+                            exit_price, hit_sl = opens[i], True
+                        elif highs[i] >= sl_level:
+                            exit_price, hit_sl = sl_level, True
+                    if not hit_sl and not np.isnan(tp_level) and lows[i] <= tp_level:
+                        exit_price, hit_tp = tp_level, True
+
+                if (hit_sl or hit_tp) and not np.isnan(prev_close) and prev_close > 0:
+                    override_ret[i] = direction * (exit_price - prev_close) / prev_close
+                    pos[i]  = 0
+                    in_trade = False
+                    sl_level = tp_level = np.nan
+
+        prev_close = closes[i]
+
+    return pd.Series(pos, index=position.index), pd.Series(override_ret, index=position.index)
+
+
 def run_backtest(
     df: pd.DataFrame,
     strategy_fn: StrategyFn,
     transaction_costs_bps: float = 5.0,
     slippage: float = 0.0,
     initial_capital: float = 100_000.0,
+    tp_pct: float = 0.0,
+    sl_pct: float = 0.0,
+    atr_sl_mult: float = 0.0,
+    atr_sl_period: int = 14,
 ) -> dict:
     """
     Execute backtest. Enters on next bar's Open after signal fires on Close.
+    Optional TP/SL: fixed % or ATR-based (atr_sl_mult > 0 overrides sl_pct).
     Returns dict with equity_curve, position, net_return, gross_return, trades.
     """
     signal = strategy_fn(df)
 
     # Shift signal by 1: act on next bar. This is the core look-ahead prevention.
     position = signal.shift(1).fillna(0).astype(int)
+
+    # Apply TP / SL before PnL calculation
+    tp_sl_active = tp_pct > 0 or sl_pct > 0 or atr_sl_mult > 0
+    override_ret: pd.Series | None = None
+    if tp_sl_active:
+        atr_series = atr(df["high"], df["low"], df["close"], atr_sl_period) \
+                     if atr_sl_mult > 0 else None
+        position, override_ret = apply_tp_sl(
+            position, df,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            atr_sl_series=atr_series,
+            atr_sl_mult=atr_sl_mult,
+        )
 
     prev_pos = position.shift(1).fillna(0).astype(int)
     is_entry = (position != 0) & (prev_pos == 0)
@@ -312,9 +425,16 @@ def run_backtest(
         + position[is_flip] * oc_ret[is_flip]
     )
 
+    # Apply TP/SL override returns (actual exit price → replaces engine's default)
+    if override_ret is not None:
+        hit = override_ret.notna()
+        bar_ret[hit] = override_ret[hit]
+
     # Transaction costs & slippage on every open (entry, exit, flip)
     trade_events = (is_entry | is_exit | is_flip).astype(float)
-    # Slippage as fraction of open price
+    # Also charge cost on TP/SL exits (they close a position)
+    if override_ret is not None:
+        trade_events = (trade_events.astype(bool) | override_ret.notna()).astype(float)
     slip_frac = slippage / df["open"].replace(0, np.nan)
     cost_per_bar = trade_events * (transaction_costs_bps / 10_000 + slip_frac.fillna(0))
 
